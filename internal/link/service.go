@@ -6,11 +6,14 @@ import (
 )
 
 const generateAttempts = 5
+const defaultResolveCacheTTL = 24 * time.Hour
 
 type Service struct {
 	repository Repository
 	generator  CodeGenerator
 	clock      Clock
+	cache      ResolveCache
+	cacheTTL   time.Duration
 }
 
 func NewService(repository Repository, generator CodeGenerator, clock Clock) *Service {
@@ -18,7 +21,24 @@ func NewService(repository Repository, generator CodeGenerator, clock Clock) *Se
 		repository: repository,
 		generator:  generator,
 		clock:      clock,
+		cacheTTL:   defaultResolveCacheTTL,
 	}
+}
+
+func NewServiceWithCache(
+	repository Repository,
+	generator CodeGenerator,
+	clock Clock,
+	cache ResolveCache,
+	cacheTTL time.Duration,
+) *Service {
+	service := NewService(repository, generator, clock)
+	service.cache = cache
+	if cacheTTL > 0 {
+		service.cacheTTL = cacheTTL
+	}
+
+	return service
 }
 
 // CreateRequest описывает входные данные API для создания короткой ссылки.
@@ -93,12 +113,22 @@ func (s *Service) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResp
 		return nil, err
 	}
 
+	if s.cache != nil {
+		originalURL, ok, err := s.cache.Get(ctx, code)
+		if err == nil && ok {
+			return &ResolveResponse{
+				OriginalURL: originalURL.Value(),
+			}, nil
+		}
+	}
+
 	shortLink, err := s.repository.Find(ctx, code)
 	if err != nil {
 		return nil, err
 	}
 
-	if shortLink.IsExpired(s.clock.Now()) {
+	now := s.clock.Now()
+	if shortLink.IsExpired(now) {
 		return nil, ErrExpiredLink
 	}
 
@@ -106,7 +136,44 @@ func (s *Service) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResp
 		return nil, ErrBlockedLink
 	}
 
+	s.cacheResolvedLink(ctx, shortLink, now)
+
 	return &ResolveResponse{
 		OriginalURL: shortLink.OriginalURL().Value(),
 	}, nil
+}
+
+func (s *Service) cacheResolvedLink(ctx context.Context, shortLink *ShortLink, now time.Time) {
+	if s.cache == nil {
+		return
+	}
+
+	ttl := s.resolveCacheTTL(shortLink, now)
+	if ttl <= 0 {
+		return
+	}
+
+	_ = s.cache.Set(ctx, shortLink.ShortCode(), shortLink.OriginalURL(), ttl)
+}
+
+func (s *Service) resolveCacheTTL(shortLink *ShortLink, now time.Time) time.Duration {
+	ttl := s.cacheTTL
+	if ttl <= 0 {
+		ttl = defaultResolveCacheTTL
+	}
+
+	expiresAt := shortLink.ExpiresAt()
+	if expiresAt == nil {
+		return ttl
+	}
+
+	untilExpiration := expiresAt.Sub(now)
+	if untilExpiration <= 0 {
+		return 0
+	}
+	if untilExpiration < ttl {
+		return untilExpiration
+	}
+
+	return ttl
 }

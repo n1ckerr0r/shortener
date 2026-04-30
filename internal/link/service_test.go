@@ -10,6 +10,7 @@ import (
 type fakeRepository struct {
 	links     map[string]*ShortLink
 	saveCalls int
+	findCalls int
 }
 
 func newFakeRepository() *fakeRepository {
@@ -25,6 +26,7 @@ func (r *fakeRepository) Save(_ context.Context, shortLink *ShortLink) error {
 }
 
 func (r *fakeRepository) Find(_ context.Context, code ShortCode) (*ShortLink, error) {
+	r.findCalls++
 	shortLink, ok := r.links[code.Value()]
 	if !ok {
 		return nil, ErrNotFound
@@ -59,6 +61,28 @@ type fakeClock struct {
 
 func (c fakeClock) Now() time.Time {
 	return c.now
+}
+
+type fakeResolveCache struct {
+	getURL   OriginalURL
+	getOK    bool
+	getErr   error
+	setCalls int
+	setCode  string
+	setURL   string
+	setTTL   time.Duration
+}
+
+func (c *fakeResolveCache) Get(_ context.Context, _ ShortCode) (OriginalURL, bool, error) {
+	return c.getURL, c.getOK, c.getErr
+}
+
+func (c *fakeResolveCache) Set(_ context.Context, code ShortCode, originalURL OriginalURL, ttl time.Duration) error {
+	c.setCalls++
+	c.setCode = code.Value()
+	c.setURL = originalURL.Value()
+	c.setTTL = ttl
+	return nil
 }
 
 func TestServiceCreateSuccess(t *testing.T) {
@@ -191,6 +215,62 @@ func TestServiceResolveBlocked(t *testing.T) {
 	_, err := service.Resolve(context.Background(), ResolveRequest{Code: "abc123"})
 	if !errors.Is(err, ErrBlockedLink) {
 		t.Fatalf("expected ErrBlockedLink, got %v", err)
+	}
+}
+
+func TestServiceResolveUsesCacheHit(t *testing.T) {
+	repo := newFakeRepository()
+	cachedURL, err := NewOriginalURL("https://cached.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &fakeResolveCache{
+		getURL: cachedURL,
+		getOK:  true,
+	}
+	service := NewServiceWithCache(repo, &fakeGenerator{}, fakeClock{now: time.Now()}, cache, time.Hour)
+
+	resp, err := service.Resolve(context.Background(), ResolveRequest{Code: "abc123"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.OriginalURL != "https://cached.example.com" {
+		t.Fatalf("expected cached url, got %s", resp.OriginalURL)
+	}
+	if repo.findCalls != 0 {
+		t.Fatalf("expected no repository lookup, got %d", repo.findCalls)
+	}
+}
+
+func TestServiceResolveCachesRepositoryResult(t *testing.T) {
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Hour)
+	repo := newFakeRepository()
+	shortLink := mustShortLink(t, "abc123", "https://example.com", now, &expiresAt)
+	if err := repo.Save(context.Background(), shortLink); err != nil {
+		t.Fatal(err)
+	}
+	cache := &fakeResolveCache{}
+	service := NewServiceWithCache(repo, &fakeGenerator{}, fakeClock{now: now}, cache, 24*time.Hour)
+
+	resp, err := service.Resolve(context.Background(), ResolveRequest{Code: "abc123"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.OriginalURL != "https://example.com" {
+		t.Fatalf("expected repository url, got %s", resp.OriginalURL)
+	}
+	if cache.setCalls != 1 {
+		t.Fatalf("expected one cache set, got %d", cache.setCalls)
+	}
+	if cache.setCode != "abc123" {
+		t.Fatalf("expected cached code abc123, got %s", cache.setCode)
+	}
+	if cache.setURL != "https://example.com" {
+		t.Fatalf("expected cached url https://example.com, got %s", cache.setURL)
+	}
+	if cache.setTTL != time.Hour {
+		t.Fatalf("expected ttl 1h, got %s", cache.setTTL)
 	}
 }
 

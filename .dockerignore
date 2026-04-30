@@ -1,0 +1,10 @@
+.git
+.github
+.idea
+.vscode
+.env
+coverage.*
+*.out
+*.test
+postgres_data
+redis_data

@@ -11,6 +11,11 @@ type Repository interface {
 	Exists(ctx context.Context, code ShortCode) (bool, error)
 }
 
+type ResolveCache interface {
+	Get(ctx context.Context, code ShortCode) (OriginalURL, bool, error)
+	Set(ctx context.Context, code ShortCode, originalURL OriginalURL, ttl time.Duration) error
+}
+
 type CodeGenerator interface {
 	Generate() (ShortCode, error)
 }
