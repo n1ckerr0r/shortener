@@ -1,12 +1,13 @@
 FROM golang:1.25-alpine AS build
 
 WORKDIR /src
+ARG SERVICE=api
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/shortener ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/shortener ./cmd/${SERVICE}
 
 FROM alpine:3.22
 
@@ -16,4 +17,5 @@ WORKDIR /app
 COPY --from=build /out/shortener /app/shortener
 
 EXPOSE 8080
+EXPOSE 9090
 ENTRYPOINT ["/app/shortener"]
