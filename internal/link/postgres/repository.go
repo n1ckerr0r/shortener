@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 
 	"github.com/n1ckerr0r/shortener/internal/link"
@@ -77,6 +78,10 @@ func (r *Repository) Save(ctx context.Context, shortLink *link.ShortLink) error 
 		expiresAt,
 		shortLink.IsBlocked(),
 	)
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+		return link.ErrShortCodeAlreadyExists
+	}
 	return err
 }
 

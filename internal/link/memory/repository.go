@@ -26,6 +26,10 @@ func (r *Repository) Save(ctx context.Context, shortLink *link.ShortLink) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if _, exists := r.links[shortLink.ShortCode().Value()]; exists {
+		return link.ErrShortCodeAlreadyExists
+	}
+
 	r.links[shortLink.ShortCode().Value()] = shortLink
 	return nil
 }

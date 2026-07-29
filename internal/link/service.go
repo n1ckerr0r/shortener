@@ -2,6 +2,7 @@ package link
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -9,11 +10,13 @@ const generateAttempts = 5
 const defaultResolveCacheTTL = 24 * time.Hour
 
 type Service struct {
-	repository Repository
-	generator  CodeGenerator
-	clock      Clock
-	cache      ResolveCache
-	cacheTTL   time.Duration
+	repository        Repository
+	generator         CodeGenerator
+	clock             Clock
+	cache             ResolveCache
+	cacheTTL          time.Duration
+	clickPublisher    ClickPublisher
+	urlCheckPublisher URLCheckPublisher
 }
 
 func NewService(repository Repository, generator CodeGenerator, clock Clock) *Service {
@@ -25,6 +28,43 @@ func NewService(repository Repository, generator CodeGenerator, clock Clock) *Se
 	}
 }
 
+type ServiceOption func(*Service)
+
+func WithResolveCache(cache ResolveCache, cacheTTL time.Duration) ServiceOption {
+	return func(service *Service) {
+		service.cache = cache
+		if cacheTTL > 0 {
+			service.cacheTTL = cacheTTL
+		}
+	}
+}
+
+func WithClickPublisher(publisher ClickPublisher) ServiceOption {
+	return func(service *Service) {
+		service.clickPublisher = publisher
+	}
+}
+
+func WithURLCheckPublisher(publisher URLCheckPublisher) ServiceOption {
+	return func(service *Service) {
+		service.urlCheckPublisher = publisher
+	}
+}
+
+func NewServiceWithOptions(
+	repository Repository,
+	generator CodeGenerator,
+	clock Clock,
+	options ...ServiceOption,
+) *Service {
+	service := NewService(repository, generator, clock)
+	for _, option := range options {
+		option(service)
+	}
+
+	return service
+}
+
 func NewServiceWithCache(
 	repository Repository,
 	generator CodeGenerator,
@@ -32,13 +72,7 @@ func NewServiceWithCache(
 	cache ResolveCache,
 	cacheTTL time.Duration,
 ) *Service {
-	service := NewService(repository, generator, clock)
-	service.cache = cache
-	if cacheTTL > 0 {
-		service.cacheTTL = cacheTTL
-	}
-
-	return service
+	return NewServiceWithOptions(repository, generator, clock, WithResolveCache(cache, cacheTTL))
 }
 
 // CreateRequest описывает входные данные API для создания короткой ссылки.
@@ -59,6 +93,10 @@ type CreateResponse struct {
 type ResolveRequest struct {
 	// Code - короткий код ссылки.
 	Code string
+	// RemoteAddr - адрес клиента для аналитики переходов.
+	RemoteAddr string
+	// UserAgent - user agent клиента для аналитики переходов.
+	UserAgent string
 }
 
 // ResolveResponse описывает ответ API с исходным адресом ссылки.
@@ -96,8 +134,13 @@ func (s *Service) Create(ctx context.Context, request CreateRequest) (*CreateRes
 		}
 
 		if err = s.repository.Save(ctx, shortLink); err != nil {
+			if errors.Is(err, ErrShortCodeAlreadyExists) {
+				continue
+			}
 			return nil, err
 		}
+
+		s.publishURLCheck(ctx, shortLink, now)
 
 		return &CreateResponse{
 			ShortCode: code.Value(),
@@ -137,10 +180,37 @@ func (s *Service) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResp
 	}
 
 	s.cacheResolvedLink(ctx, shortLink, now)
+	s.publishClick(ctx, shortLink, now, req)
 
 	return &ResolveResponse{
 		OriginalURL: shortLink.OriginalURL().Value(),
 	}, nil
+}
+
+func (s *Service) publishURLCheck(ctx context.Context, shortLink *ShortLink, createdAt time.Time) {
+	if s.urlCheckPublisher == nil {
+		return
+	}
+
+	_ = s.urlCheckPublisher.PublishURLCheck(ctx, URLCheckJob{
+		Code:        shortLink.ShortCode().Value(),
+		OriginalURL: shortLink.OriginalURL().Value(),
+		CreatedAt:   createdAt,
+	})
+}
+
+func (s *Service) publishClick(ctx context.Context, shortLink *ShortLink, clickedAt time.Time, req ResolveRequest) {
+	if s.clickPublisher == nil {
+		return
+	}
+
+	_ = s.clickPublisher.PublishClick(ctx, ClickEvent{
+		Code:        shortLink.ShortCode().Value(),
+		OriginalURL: shortLink.OriginalURL().Value(),
+		ClickedAt:   clickedAt,
+		RemoteAddr:  req.RemoteAddr,
+		UserAgent:   req.UserAgent,
+	})
 }
 
 func (s *Service) cacheResolvedLink(ctx context.Context, shortLink *ShortLink, now time.Time) {
