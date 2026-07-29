@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -38,6 +39,10 @@ func (h *CreateLinkHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != nil && !errors.Is(err, io.EOF) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -77,7 +82,11 @@ func (h *RedirectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.service.Resolve(r.Context(), link.ResolveRequest{Code: code})
+	resp, err := h.service.Resolve(r.Context(), link.ResolveRequest{
+		Code:       code,
+		RemoteAddr: r.RemoteAddr,
+		UserAgent:  r.UserAgent(),
+	})
 	if err != nil {
 		writeError(w, err)
 		return

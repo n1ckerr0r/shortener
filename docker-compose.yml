@@ -2,19 +2,69 @@ services:
   api:
     build:
       context: .
+      args:
+        SERVICE: api
     container_name: shortener-api
     restart: unless-stopped
     environment:
       SHORTENER_ADDR: ":8080"
+      SHORTENER_GRPC_ADDR: ":9090"
       DATABASE_URL: postgres://shortener:shortener@postgres:5432/shortener?sslmode=disable
       REDIS_ADDR: redis:6379
       REDIS_CACHE_TTL: 24h
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLICK_TOPIC: link.clicked
+      KAFKA_PUBLISH_WORKERS: 4
+      RABBITMQ_URL: amqp://shortener:shortener@rabbitmq:5672/
+      RABBITMQ_URL_CHECK_QUEUE: url.check
     ports:
       - "${API_PORT:-8080}:8080"
+      - "${GRPC_PORT:-9090}:9090"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  analytics:
+    build:
+      context: .
+      args:
+        SERVICE: analytics
+    container_name: shortener-analytics
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLICK_TOPIC: link.clicked
+      KAFKA_GROUP_ID: shortener-analytics
+      MONGO_URI: mongodb://mongo:27017
+      MONGO_DATABASE: shortener
+      MONGO_CLICK_COLLECTION: clicks
+      ANALYTICS_WORKERS: 4
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+  urlcheck:
+    build:
+      context: .
+      args:
+        SERVICE: urlcheck
+    container_name: shortener-urlcheck
+    restart: unless-stopped
+    environment:
+      RABBITMQ_URL: amqp://shortener:shortener@rabbitmq:5672/
+      RABBITMQ_URL_CHECK_QUEUE: url.check
+      URLCHECK_WORKERS: 4
+      URLCHECK_TIMEOUT: 5s
+    depends_on:
+      rabbitmq:
         condition: service_healthy
 
   postgres:
@@ -50,6 +100,102 @@ services:
     volumes:
       - redis_data:/data
 
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: shortener-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - kafka_data:/bitnami/kafka
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: shortener-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: shortener
+      RABBITMQ_DEFAULT_PASS: shortener
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_UI_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  mongo:
+    image: mongo:7
+    container_name: shortener-mongo
+    restart: unless-stopped
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mongo_data:/data/db
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: shortener-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      api:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: shortener-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: light
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+
 volumes:
   postgres_data:
   redis_data:
+  kafka_data:
+  rabbitmq_data:
+  mongo_data:
+  prometheus_data:
+  grafana_data:

@@ -24,7 +24,11 @@ func TestCacheSetGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cache.Close()
+	defer func() {
+		if err = cache.Close(); err != nil {
+			t.Logf("close cache: %v", err)
+		}
+	}()
 
 	code, err := link.NewShortCode(fmt.Sprintf("test%d", time.Now().UnixNano()))
 	if err != nil {

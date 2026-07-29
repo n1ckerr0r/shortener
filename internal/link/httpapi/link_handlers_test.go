@@ -64,6 +64,19 @@ func TestCreateLinkHandlerInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestCreateLinkHandlerRejectsMultipleJSONDocuments(t *testing.T) {
+	handler := NewCreateLinkHandler(newTestService(t))
+
+	req := httptest.NewRequest(http.MethodPost, "/links", strings.NewReader(`{"url":"https://example.com"}{"url":"https://evil.example.com"}`))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
 func TestCreateLinkHandlerInvalidURL(t *testing.T) {
 	handler := NewCreateLinkHandler(newTestService(t))
 

@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/n1ckerr0r/shortener/internal/app"
+	"github.com/n1ckerr0r/shortener/internal/urlcheck"
 )
 
 func main() {
@@ -13,8 +13,8 @@ func main() {
 		Level: slog.LevelInfo,
 	}))
 
-	if err := app.Run(context.Background(), logger); err != nil {
-		logger.Error("application_stopped", slog.Any("error", err))
+	if err := urlcheck.Run(context.Background(), logger); err != nil {
+		logger.Error("urlcheck_stopped_with_error", slog.Any("error", err))
 		os.Exit(1)
 	}
 }

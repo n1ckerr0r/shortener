@@ -22,7 +22,11 @@ func TestRepositorySaveFindExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		if err = db.Close(); err != nil {
+			t.Logf("close db: %v", err)
+		}
+	}()
 
 	repo := NewRepository(db)
 	if err = repo.Ping(ctx); err != nil {

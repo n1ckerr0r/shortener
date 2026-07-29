@@ -23,3 +23,11 @@ type CodeGenerator interface {
 type Clock interface {
 	Now() time.Time
 }
+
+type ClickPublisher interface {
+	PublishClick(ctx context.Context, event ClickEvent) error
+}
+
+type URLCheckPublisher interface {
+	PublishURLCheck(ctx context.Context, job URLCheckJob) error
+}

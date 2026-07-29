@@ -11,6 +11,7 @@ type fakeRepository struct {
 	links     map[string]*ShortLink
 	saveCalls int
 	findCalls int
+	saveErr   error
 }
 
 func newFakeRepository() *fakeRepository {
@@ -21,6 +22,14 @@ func newFakeRepository() *fakeRepository {
 
 func (r *fakeRepository) Save(_ context.Context, shortLink *ShortLink) error {
 	r.saveCalls++
+	if r.saveErr != nil {
+		err := r.saveErr
+		r.saveErr = nil
+		return err
+	}
+	if _, exists := r.links[shortLink.ShortCode().Value()]; exists {
+		return ErrShortCodeAlreadyExists
+	}
 	r.links[shortLink.ShortCode().Value()] = shortLink
 	return nil
 }
@@ -73,6 +82,24 @@ type fakeResolveCache struct {
 	setTTL   time.Duration
 }
 
+type fakeClickPublisher struct {
+	events []ClickEvent
+}
+
+func (p *fakeClickPublisher) PublishClick(_ context.Context, event ClickEvent) error {
+	p.events = append(p.events, event)
+	return nil
+}
+
+type fakeURLCheckPublisher struct {
+	jobs []URLCheckJob
+}
+
+func (p *fakeURLCheckPublisher) PublishURLCheck(_ context.Context, job URLCheckJob) error {
+	p.jobs = append(p.jobs, job)
+	return nil
+}
+
 func (c *fakeResolveCache) Get(_ context.Context, _ ShortCode) (OriginalURL, bool, error) {
 	return c.getURL, c.getOK, c.getErr
 }
@@ -104,6 +131,37 @@ func TestServiceCreateSuccess(t *testing.T) {
 	}
 	if repo.links["abc123"].CreatedAt() != clock.now {
 		t.Fatalf("created time was not taken from clock")
+	}
+}
+
+func TestServiceCreatePublishesURLCheckJob(t *testing.T) {
+	repo := newFakeRepository()
+	publisher := &fakeURLCheckPublisher{}
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	service := NewServiceWithOptions(
+		repo,
+		&fakeGenerator{codes: []string{"abc123"}},
+		fakeClock{now: now},
+		WithURLCheckPublisher(publisher),
+	)
+
+	_, err := service.Create(context.Background(), CreateRequest{
+		OriginalURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(publisher.jobs) != 1 {
+		t.Fatalf("expected one url check job, got %d", len(publisher.jobs))
+	}
+	if publisher.jobs[0].Code != "abc123" {
+		t.Fatalf("expected job code abc123, got %s", publisher.jobs[0].Code)
+	}
+	if publisher.jobs[0].OriginalURL != "https://example.com" {
+		t.Fatalf("expected job url https://example.com, got %s", publisher.jobs[0].OriginalURL)
+	}
+	if !publisher.jobs[0].CreatedAt.Equal(now) {
+		t.Fatalf("expected job created at %s, got %s", now, publisher.jobs[0].CreatedAt)
 	}
 }
 
@@ -168,6 +226,25 @@ func TestServiceCreateRetriesShortCodeCollision(t *testing.T) {
 	}
 }
 
+func TestServiceCreateRetriesWhenSaveDetectsConcurrentCollision(t *testing.T) {
+	repo := newFakeRepository()
+	repo.saveErr = ErrShortCodeAlreadyExists
+	service := NewService(repo, &fakeGenerator{codes: []string{"abc123", "def456"}}, fakeClock{now: time.Now()})
+
+	resp, err := service.Create(context.Background(), CreateRequest{
+		OriginalURL: "https://example.org",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.ShortCode != "def456" {
+		t.Fatalf("expected def456 after retry, got %s", resp.ShortCode)
+	}
+	if repo.saveCalls != 2 {
+		t.Fatalf("expected two save attempts, got %d", repo.saveCalls)
+	}
+}
+
 func TestServiceResolveSuccess(t *testing.T) {
 	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
 	repo := newFakeRepository()
@@ -183,6 +260,43 @@ func TestServiceResolveSuccess(t *testing.T) {
 	}
 	if resp.OriginalURL != "https://example.com" {
 		t.Fatalf("expected https://example.com, got %s", resp.OriginalURL)
+	}
+}
+
+func TestServiceResolvePublishesClickEvent(t *testing.T) {
+	now := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	repo := newFakeRepository()
+	shortLink := mustShortLink(t, "abc123", "https://example.com", now, nil)
+	if err := repo.Save(context.Background(), shortLink); err != nil {
+		t.Fatal(err)
+	}
+	publisher := &fakeClickPublisher{}
+	service := NewServiceWithOptions(repo, &fakeGenerator{}, fakeClock{now: now}, WithClickPublisher(publisher))
+
+	_, err := service.Resolve(context.Background(), ResolveRequest{
+		Code:       "abc123",
+		RemoteAddr: "127.0.0.1:1234",
+		UserAgent:  "test-agent",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("expected one click event, got %d", len(publisher.events))
+	}
+
+	event := publisher.events[0]
+	if event.Code != "abc123" {
+		t.Fatalf("expected event code abc123, got %s", event.Code)
+	}
+	if event.OriginalURL != "https://example.com" {
+		t.Fatalf("expected event url https://example.com, got %s", event.OriginalURL)
+	}
+	if event.RemoteAddr != "127.0.0.1:1234" {
+		t.Fatalf("expected event remote addr 127.0.0.1:1234, got %s", event.RemoteAddr)
+	}
+	if event.UserAgent != "test-agent" {
+		t.Fatalf("expected event user agent test-agent, got %s", event.UserAgent)
 	}
 }
 
